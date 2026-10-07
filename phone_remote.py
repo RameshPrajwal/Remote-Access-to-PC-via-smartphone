@@ -279,7 +279,9 @@ REMOTE_PAGE = r"""<!doctype html>
     background-image:radial-gradient(circle, rgba(233,237,243,.07) 1px, transparent 1.5px);
     background-size:22px 22px; background-position:11px 11px;
     box-shadow:inset 0 0 0 1px rgba(233,237,243,.06);
+    transition:box-shadow .12s;
   }
+  #pad.drag { box-shadow:inset 0 0 0 2px var(--mark); }
   .hint {
     position:absolute; left:0; right:0; bottom:16px; text-align:center; pointer-events:none;
     color:var(--muted); font-size:13px; line-height:1.5; padding:0 20px; transition:opacity .3s;
@@ -289,6 +291,7 @@ REMOTE_PAGE = r"""<!doctype html>
     position:absolute; width:56px; height:56px; margin:-28px 0 0 -28px; border-radius:50%;
     border:2px solid var(--mark); pointer-events:none; animation:blip .32s ease-out forwards;
   }
+  .blip.alt { border-color:var(--ok); }
   @keyframes blip { from { transform:scale(.3); opacity:.9; } to { transform:scale(1); opacity:0; } }
   @media (prefers-reduced-motion: reduce) { .blip { animation-duration:.01s; } }
 </style>
@@ -300,7 +303,7 @@ REMOTE_PAGE = r"""<!doctype html>
   </div>
 
   <div id="pad" role="application" aria-label="Trackpad">
-    <div class="hint">Slide to move, tap to click.</div>
+    <div class="hint">Slide to move, tap to click.<br>Two fingers scroll, a two-finger tap right-clicks.<br>Hold still, then slide to drag.</div>
   </div>
 </div>
 
@@ -338,19 +341,23 @@ REMOTE_PAGE = r"""<!doctype html>
   // ---- Trackpad ----------------------------------------------------------
   var SLOP = 7;            // px a finger may wobble and still count as a tap
   var TAP_MS = 320;        // longest touch that counts as a tap
+  var HOLD_MS = 380;       // holding still this long picks things up for dragging
+  var NOTCH = 42;          // finger px per scroll-wheel notch
   var fingers = new Map(); // touch id -> last position
   var g = null;            // the gesture in progress
-  var mx = 0, my = 0, frame = 0;
+  var dragging = false, holdTimer = 0;
+  var mx = 0, my = 0, sx = 0, sy = 0, frame = 0;
 
   function flush() {
     frame = 0;
     if (mx || my) { send({ t: 'm', x: +mx.toFixed(2), y: +my.toFixed(2) }); mx = my = 0; }
+    if (sx || sy) { send({ t: 's', x: +sx.toFixed(3), y: +sy.toFixed(3) }); sx = sy = 0; }
   }
   function queue() { if (!frame) frame = requestAnimationFrame(flush); }
 
-  function blip(x, y) {
+  function blip(x, y, alt) {
     var r = pad.getBoundingClientRect(), d = document.createElement('i');
-    d.className = 'blip';
+    d.className = 'blip' + (alt ? ' alt' : '');
     d.style.left = (x - r.left) + 'px'; d.style.top = (y - r.top) + 'px';
     pad.appendChild(d);
     setTimeout(function () { d.remove(); }, 400);
@@ -366,8 +373,15 @@ REMOTE_PAGE = r"""<!doctype html>
     if (!g) {
       var first = e.changedTouches[0];
       g = { start: now, travel: 0, most: 0, moving: false, x: first.clientX, y: first.clientY };
+      // One finger resting in place: press the left button so the next slide drags.
+      holdTimer = setTimeout(function () {
+        if (!g || g.moving || g.most !== 1) return;
+        dragging = true; pad.classList.add('drag'); app.classList.add('used');
+        send({ t: 'd', b: 'left', down: true });
+      }, HOLD_MS);
     }
     g.most = Math.max(g.most, fingers.size);
+    if (g.most > 1) clearTimeout(holdTimer);
   }, { passive: false });
 
   pad.addEventListener('touchmove', function (e) {
@@ -386,12 +400,15 @@ REMOTE_PAGE = r"""<!doctype html>
     g.travel += dist;
     if (!g.moving) {
       if (g.travel < SLOP) return;
-      g.moving = true; app.classList.add('used');
+      g.moving = true; app.classList.add('used'); clearTimeout(holdTimer);
     }
     if (g.most === 1) {
       // Slow fingers move precisely, fast swipes cross the screen.
       var gain = 1 + Math.min(dist / dt * 2.4, 4.5);
       mx += dx * gain; my += dy * gain;
+    } else if (fingers.size >= 2) {
+      // Content follows the fingers, like scrolling on the phone itself.
+      sx -= dx / 2 / NOTCH; sy += dy / 2 / NOTCH;
     }
     queue();
   }, { passive: false });
@@ -401,9 +418,13 @@ REMOTE_PAGE = r"""<!doctype html>
     for (var i = 0; i < e.changedTouches.length; i++) fingers.delete(e.changedTouches[i].identifier);
     if (fingers.size || !g) return;
     var now = performance.now();
+    clearTimeout(holdTimer);
     flush();
-    if (e.type === 'touchend' && !g.moving && now - g.start < TAP_MS && g.most === 1) {
-      send({ t: 'c', b: 'left' }); blip(g.x, g.y);
+    if (dragging) {
+      dragging = false; pad.classList.remove('drag'); send({ t: 'd', b: 'left', down: false });
+    } else if (e.type === 'touchend' && !g.moving && now - g.start < TAP_MS) {
+      if (g.most === 1) { send({ t: 'c', b: 'left' }); blip(g.x, g.y); }
+      else if (g.most === 2) { send({ t: 'c', b: 'right' }); blip(g.x, g.y, true); }
     }
     g = null;
   }
