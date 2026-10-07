@@ -271,6 +271,26 @@ REMOTE_PAGE = r"""<!doctype html>
   .state b { font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); flex:none; }
   .on .dot { background:var(--ok); }
+
+  /* Trackpad */
+  #pad {
+    flex:1; min-height:120px; position:relative; overflow:hidden; touch-action:none;
+    border-radius:22px; background:var(--pad);
+    background-image:radial-gradient(circle, rgba(233,237,243,.07) 1px, transparent 1.5px);
+    background-size:22px 22px; background-position:11px 11px;
+    box-shadow:inset 0 0 0 1px rgba(233,237,243,.06);
+  }
+  .hint {
+    position:absolute; left:0; right:0; bottom:16px; text-align:center; pointer-events:none;
+    color:var(--muted); font-size:13px; line-height:1.5; padding:0 20px; transition:opacity .3s;
+  }
+  .used .hint { opacity:0; }
+  .blip {
+    position:absolute; width:56px; height:56px; margin:-28px 0 0 -28px; border-radius:50%;
+    border:2px solid var(--mark); pointer-events:none; animation:blip .32s ease-out forwards;
+  }
+  @keyframes blip { from { transform:scale(.3); opacity:.9; } to { transform:scale(1); opacity:0; } }
+  @media (prefers-reduced-motion: reduce) { .blip { animation-duration:.01s; } }
 </style>
 </head>
 <body>
@@ -278,13 +298,17 @@ REMOTE_PAGE = r"""<!doctype html>
   <div class="top">
     <div class="state" id="state"><i class="dot"></i><span id="stateText">Connecting</span></div>
   </div>
+
+  <div id="pad" role="application" aria-label="Trackpad">
+    <div class="hint">Slide to move, tap to click.</div>
+  </div>
 </div>
 
 <script>
 (function () {
   'use strict';
   var $ = function (id) { return document.getElementById(id); };
-  var app = $('app'), stateEl = $('state'), stateText = $('stateText');
+  var app = $('app'), pad = $('pad'), stateEl = $('state'), stateText = $('stateText');
 
   // ---- Connection --------------------------------------------------------
   var ws = null, retry = 0, pcName = '';
@@ -310,6 +334,81 @@ REMOTE_PAGE = r"""<!doctype html>
   document.addEventListener('visibilitychange', function () { if (!document.hidden) connect(); });
   window.addEventListener('pageshow', connect);
   connect();
+
+  // ---- Trackpad ----------------------------------------------------------
+  var SLOP = 7;            // px a finger may wobble and still count as a tap
+  var TAP_MS = 320;        // longest touch that counts as a tap
+  var fingers = new Map(); // touch id -> last position
+  var g = null;            // the gesture in progress
+  var mx = 0, my = 0, frame = 0;
+
+  function flush() {
+    frame = 0;
+    if (mx || my) { send({ t: 'm', x: +mx.toFixed(2), y: +my.toFixed(2) }); mx = my = 0; }
+  }
+  function queue() { if (!frame) frame = requestAnimationFrame(flush); }
+
+  function blip(x, y) {
+    var r = pad.getBoundingClientRect(), d = document.createElement('i');
+    d.className = 'blip';
+    d.style.left = (x - r.left) + 'px'; d.style.top = (y - r.top) + 'px';
+    pad.appendChild(d);
+    setTimeout(function () { d.remove(); }, 400);
+  }
+
+  pad.addEventListener('touchstart', function (e) {
+    e.preventDefault();
+    var now = performance.now();
+    for (var i = 0; i < e.changedTouches.length; i++) {
+      var t = e.changedTouches[i];
+      fingers.set(t.identifier, { x: t.clientX, y: t.clientY, t: now });
+    }
+    if (!g) {
+      var first = e.changedTouches[0];
+      g = { start: now, travel: 0, most: 0, moving: false, x: first.clientX, y: first.clientY };
+    }
+    g.most = Math.max(g.most, fingers.size);
+  }, { passive: false });
+
+  pad.addEventListener('touchmove', function (e) {
+    e.preventDefault();
+    if (!g) return;
+    var now = performance.now(), dx = 0, dy = 0, dt = 16, hit = 0;
+    for (var i = 0; i < e.changedTouches.length; i++) {
+      var t = e.changedTouches[i], f = fingers.get(t.identifier);
+      if (!f) continue;
+      dx += t.clientX - f.x; dy += t.clientY - f.y;
+      dt = Math.max(4, now - f.t);
+      f.x = t.clientX; f.y = t.clientY; f.t = now; hit++;
+    }
+    if (!hit) return;
+    var dist = Math.hypot(dx, dy);
+    g.travel += dist;
+    if (!g.moving) {
+      if (g.travel < SLOP) return;
+      g.moving = true; app.classList.add('used');
+    }
+    if (g.most === 1) {
+      // Slow fingers move precisely, fast swipes cross the screen.
+      var gain = 1 + Math.min(dist / dt * 2.4, 4.5);
+      mx += dx * gain; my += dy * gain;
+    }
+    queue();
+  }, { passive: false });
+
+  function lift(e) {
+    e.preventDefault();
+    for (var i = 0; i < e.changedTouches.length; i++) fingers.delete(e.changedTouches[i].identifier);
+    if (fingers.size || !g) return;
+    var now = performance.now();
+    flush();
+    if (e.type === 'touchend' && !g.moving && now - g.start < TAP_MS && g.most === 1) {
+      send({ t: 'c', b: 'left' }); blip(g.x, g.y);
+    }
+    g = null;
+  }
+  pad.addEventListener('touchend', lift, { passive: false });
+  pad.addEventListener('touchcancel', lift, { passive: false });
 })();
 </script>
 </body>
