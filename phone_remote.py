@@ -123,6 +123,27 @@ class RealInput:
                 self.keyboard.type(ch)
 
 
+class PrintInput(RealInput):
+    """Used with --dry-run: prints what would happen instead of doing it."""
+
+    def __init__(self):
+        self.buttons = dict.fromkeys(("left", "right", "middle"))
+        self.keys = dict.fromkeys((
+            "esc enter tab space backspace delete up down left right home end "
+            "pageup pagedown play next prev volup voldown mute").split())
+        self.held = set()
+
+    def move(self, dx, dy): print(f"move {dx:+.1f} {dy:+.1f}", flush=True)
+    def scroll(self, dx, dy): print(f"scroll {dx:+.2f} {dy:+.2f}", flush=True)
+    def click(self, button, count=1): print(f"click {button} x{count}", flush=True)
+    def key(self, name): print(f"key {name}", flush=True)
+    def type(self, text, backspaces=0): print(f"type {text!r} backspaces={backspaces}", flush=True)
+
+    def hold(self, button, down):
+        print(f"{'press' if down else 'release'} {button}", flush=True)
+        (self.held.add if down else self.held.discard)(button)
+
+
 def clamp(value, limit):
     try:
         value = float(value)
@@ -259,6 +280,8 @@ def main():
                         help="do not open the pairing page on this PC")
     parser.add_argument("--new-key", action="store_true",
                         help="make a new link; phones paired before must scan again")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the phone's actions instead of doing them")
     args = parser.parse_args()
 
     if args.new_key:
@@ -267,12 +290,15 @@ def main():
         except OSError:
             pass
 
-    try:
-        inp = RealInput()
-    except ImportError as err:
-        if "pynput" in str(err) and "No module" in str(err):
-            sys.exit("Missing packages. Run this first:\n\n    pip install aiohttp pynput qrcode\n")
-        sys.exit(f"This PC would not let the program control the mouse:\n{err}")
+    if args.dry_run:
+        inp = PrintInput()
+    else:
+        try:
+            inp = RealInput()
+        except ImportError as err:
+            if "pynput" in str(err) and "No module" in str(err):
+                sys.exit("Missing packages. Run this first:\n\n    pip install aiohttp pynput qrcode\n")
+            sys.exit(f"This PC would not let the program control the mouse:\n{err}")
 
     sock, port = open_socket(args.port)
     key = load_key()
