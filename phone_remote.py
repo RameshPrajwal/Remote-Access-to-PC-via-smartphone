@@ -373,12 +373,14 @@ REMOTE_PAGE = r"""<!doctype html>
             calc(env(safe-area-inset-bottom) + 10px) calc(env(safe-area-inset-left) + 10px);
   }
 
-  /* Top line: connection */
+  /* Top line: connection and cursor speed */
   .top { display:flex; align-items:center; gap:8px; min-height:34px; flex:none; }
   .state { display:flex; align-items:center; gap:8px; flex:1; min-width:0; color:var(--muted); font-size:14px; }
   .state b { font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); flex:none; }
   .on .dot { background:var(--ok); }
+  .speed { border:0; background:none; color:var(--muted); font:inherit; font-size:14px; padding:8px 4px; }
+  .speed span { color:var(--text); font-weight:600; }
 
   /* Typing bar, shown while the phone keyboard is open */
   .typebar { display:none; gap:var(--gap); flex:none; }
@@ -444,6 +446,7 @@ REMOTE_PAGE = r"""<!doctype html>
 <div id="app">
   <div class="top">
     <div class="state" id="state"><i class="dot"></i><span id="stateText">Connecting</span></div>
+    <button class="speed" id="speed" aria-label="Change cursor speed">Cursor <span id="speedText">normal</span></button>
   </div>
 
   <div class="typebar">
@@ -534,6 +537,15 @@ REMOTE_PAGE = r"""<!doctype html>
   window.addEventListener('pageshow', connect);
   connect();
 
+  // ---- Cursor speed ------------------------------------------------------
+  var speeds = [['slow', 0.65], ['normal', 1.0], ['fast', 1.6]];
+  var speedIndex = Math.min(2, Math.max(0, parseInt(load('remoteSpeed') || '1', 10) || 0));
+  function showSpeed() { $('speedText').textContent = speeds[speedIndex][0]; }
+  $('speed').addEventListener('click', function () {
+    speedIndex = (speedIndex + 1) % speeds.length; save('remoteSpeed', String(speedIndex)); showSpeed();
+  });
+  showSpeed();
+
   // ---- Trackpad ----------------------------------------------------------
   var SLOP = 7;            // px a finger may wobble and still count as a tap
   var TAP_MS = 320;        // longest touch that counts as a tap
@@ -600,7 +612,7 @@ REMOTE_PAGE = r"""<!doctype html>
     }
     if (g.most === 1) {
       // Slow fingers move precisely, fast swipes cross the screen.
-      var gain = 1 + Math.min(dist / dt * 2.4, 4.5);
+      var gain = speeds[speedIndex][1] * (1 + Math.min(dist / dt * 2.4, 4.5));
       mx += dx * gain; my += dy * gain;
     } else if (fingers.size >= 2) {
       // Content follows the fingers, like scrolling on the phone itself.
