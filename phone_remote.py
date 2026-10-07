@@ -6,22 +6,143 @@ Run this on the PC, then open the address it prints in the phone's browser
 (both must be on the same Wi-Fi). The page works as the remote, so nothing
 has to be installed on the phone.
 
-    pip install aiohttp
+    pip install aiohttp pynput
     python phone_remote.py
 """
 import argparse
+import json
+import math
 import os
 import platform
 import socket
 import sys
 
 try:
-    from aiohttp import web
+    from aiohttp import WSMsgType, web
 except ImportError:
-    sys.exit("Missing packages. Run this first:\n\n    pip install aiohttp\n")
+    sys.exit("Missing packages. Run this first:\n\n    pip install aiohttp pynput\n")
 
 SYSTEM = platform.system()  # "Windows", "Darwin" or "Linux"
 DEFAULT_PORT = 8765
+
+
+# ----------------------------------------------------------------------------
+# Moving the real mouse and keyboard
+# ----------------------------------------------------------------------------
+class RealInput:
+    """Sends mouse and keyboard input to this computer through pynput."""
+
+    def __init__(self):
+        if SYSTEM == "Windows":
+            # Makes cursor movement use real pixels on scaled (125%, 150%) displays.
+            try:
+                import ctypes
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            except Exception:
+                pass
+        from pynput.keyboard import Controller as Keyboard, Key
+        from pynput.mouse import Button, Controller as Mouse
+
+        self.mouse = Mouse()
+        self.keyboard = Keyboard()
+        self.buttons = {"left": Button.left, "right": Button.right, "middle": Button.middle}
+        self.keys = {
+            "esc": Key.esc, "enter": Key.enter, "tab": Key.tab, "space": Key.space,
+            "backspace": Key.backspace, "delete": Key.delete,
+            "up": Key.up, "down": Key.down, "left": Key.left, "right": Key.right,
+            "home": Key.home, "end": Key.end, "pageup": Key.page_up, "pagedown": Key.page_down,
+            "play": Key.media_play_pause, "next": Key.media_next, "prev": Key.media_previous,
+            "volup": Key.media_volume_up, "voldown": Key.media_volume_down,
+            "mute": Key.media_volume_mute,
+        }
+        self._mx = self._my = 0.0   # leftover fractions of a pixel
+        self._sx = self._sy = 0.0   # leftover fractions of a scroll notch
+        self.held = set()
+
+    def move(self, dx, dy):
+        self._mx += dx
+        self._my += dy
+        ix, iy = int(self._mx), int(self._my)
+        if ix or iy:
+            self._mx -= ix
+            self._my -= iy
+            self.mouse.move(ix, iy)
+
+    def scroll(self, dx, dy):
+        """dx, dy are in wheel notches and may be fractions."""
+        self._sx += dx
+        self._sy += dy
+        if SYSTEM == "Windows":
+            # Windows accepts 1/120ths of a notch, which gives smooth scrolling.
+            qx, qy = int(self._sx * 120), int(self._sy * 120)
+            if qx or qy:
+                self._sx -= qx / 120
+                self._sy -= qy / 120
+                nudge = lambda q: (q + math.copysign(0.5, q)) / 120 if q else 0
+                self.mouse.scroll(nudge(qx), nudge(qy))
+        else:
+            scale = 4 if SYSTEM == "Darwin" else 2
+            qx, qy = int(self._sx * scale), int(self._sy * scale)
+            if qx or qy:
+                self._sx -= qx / scale
+                self._sy -= qy / scale
+                self.mouse.scroll(qx, qy)
+
+    def click(self, button, count=1):
+        self.mouse.click(self.buttons[button], count)
+
+    def hold(self, button, down):
+        b = self.buttons[button]
+        if down and button not in self.held:
+            self.mouse.press(b)
+            self.held.add(button)
+        elif not down and button in self.held:
+            self.mouse.release(b)
+            self.held.discard(button)
+
+    def release_all(self):
+        for button in list(self.held):
+            self.hold(button, False)
+
+    def key(self, name):
+        self.keyboard.tap(self.keys[name])
+
+    def type(self, text, backspaces=0):
+        from pynput.keyboard import Key
+        for _ in range(backspaces):
+            self.keyboard.tap(Key.backspace)
+        for ch in text:
+            if ch == "\n":
+                self.keyboard.tap(Key.enter)
+            else:
+                self.keyboard.type(ch)
+
+
+def clamp(value, limit):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if value != value:  # NaN
+        return 0.0
+    return max(-limit, min(limit, value))
+
+
+def handle_message(inp, msg):
+    kind = msg.get("t")
+    if kind == "m":
+        inp.move(clamp(msg.get("x"), 3000), clamp(msg.get("y"), 3000))
+    elif kind == "s":
+        inp.scroll(clamp(msg.get("x"), 40), clamp(msg.get("y"), 40))
+    elif kind == "c" and msg.get("b") in inp.buttons:
+        inp.click(msg["b"], 2 if msg.get("n") == 2 else 1)
+    elif kind == "d" and msg.get("b") in inp.buttons:
+        inp.hold(msg["b"], bool(msg.get("down")))
+    elif kind == "k" and msg.get("k") in inp.keys:
+        inp.key(msg["k"])
+    elif kind == "x":
+        text = str(msg.get("s", ""))[:500]
+        inp.type(text, int(clamp(msg.get("bs"), 500)))
 
 
 # ----------------------------------------------------------------------------
@@ -30,6 +151,29 @@ DEFAULT_PORT = 8765
 async def page(request):
     return web.Response(text=REMOTE_PAGE, content_type="text/html",
                         headers={"Cache-Control": "no-store"})
+
+
+async def websocket(request):
+    app = request.app
+    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=8192)
+    await ws.prepare(request)
+    inp = app["input"]
+    print(f"Phone connected ({request.remote})", flush=True)
+    await ws.send_json({"t": "hello", "name": app["name"]})
+    try:
+        async for raw in ws:
+            if raw.type != WSMsgType.TEXT:
+                continue
+            try:
+                msg = json.loads(raw.data)
+                if isinstance(msg, dict):
+                    handle_message(inp, msg)
+            except Exception as err:  # one bad event must not drop the phone
+                print(f"Could not apply {raw.data!r}: {err}", flush=True)
+    finally:
+        inp.release_all()  # never leave a mouse button stuck down
+        print(f"Phone disconnected ({request.remote})", flush=True)
+    return ws
 
 
 def lan_address():
@@ -65,10 +209,19 @@ def main():
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
 
+    try:
+        inp = RealInput()
+    except ImportError as err:
+        if "pynput" in str(err) and "No module" in str(err):
+            sys.exit("Missing packages. Run this first:\n\n    pip install aiohttp pynput\n")
+        sys.exit(f"This PC would not let the program control the mouse:\n{err}")
+
     sock, port = open_socket(args.port)
     app = web.Application()
+    app["input"] = inp
+    app["name"] = platform.node() or "this PC"
     url = f"http://{lan_address()}:{port}/"
-    app.add_routes([web.get("/", page)])
+    app.add_routes([web.get("/", page), web.get("/ws", websocket)])
 
     print("\nPhone Remote is running.\n")
     print("Open this on your phone (same Wi-Fi as the PC):\n")
@@ -123,9 +276,42 @@ REMOTE_PAGE = r"""<!doctype html>
 <body>
 <div id="app">
   <div class="top">
-    <div class="state" id="state"><i class="dot"></i><span id="stateText">Page served by the PC</span></div>
+    <div class="state" id="state"><i class="dot"></i><span id="stateText">Connecting</span></div>
   </div>
 </div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var app = $('app'), stateEl = $('state'), stateText = $('stateText');
+
+  // ---- Connection --------------------------------------------------------
+  var ws = null, retry = 0, pcName = '';
+
+  function connect() {
+    clearTimeout(retry);
+    if (ws && ws.readyState < 2) return;
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    ws.onmessage = function (e) {
+      var m = {}; try { m = JSON.parse(e.data); } catch (err) {}
+      if (m.t === 'hello') {
+        pcName = m.name; stateEl.classList.add('on');
+        stateText.innerHTML = 'Controlling <b></b>'; stateText.querySelector('b').textContent = pcName;
+      }
+    };
+    ws.onclose = function (e) {
+      stateEl.classList.remove('on');
+      stateText.textContent = 'Not connected. Is the PC on and the remote running?';
+      retry = setTimeout(connect, 1200);
+    };
+  }
+  function send(msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) connect(); });
+  window.addEventListener('pageshow', connect);
+  connect();
+})();
+</script>
 </body>
 </html>
 """
