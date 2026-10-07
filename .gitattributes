@@ -1,0 +1,4 @@
+# Store text with LF endings; Windows batch files need CRLF when checked out
+* text=auto
+*.bat text eol=crlf
+*.png binary
