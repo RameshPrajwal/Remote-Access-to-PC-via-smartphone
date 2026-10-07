@@ -272,6 +272,17 @@ REMOTE_PAGE = r"""<!doctype html>
   .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); flex:none; }
   .on .dot { background:var(--ok); }
 
+  /* Typing bar, shown while the phone keyboard is open */
+  .typebar { display:none; gap:var(--gap); flex:none; }
+  .typing .typebar { display:flex; }
+  .typing .top { display:none; }
+  .typebar input {
+    flex:1; min-width:0; height:44px; border-radius:12px; border:1.5px solid var(--mark);
+    background:var(--pad); color:var(--text); font:inherit; font-size:17px; padding:0 12px; outline:0;
+    -webkit-user-select:text; user-select:text;
+  }
+  .typebar input::placeholder { color:var(--muted); }
+
   /* Trackpad */
   #pad {
     flex:1; min-height:120px; position:relative; overflow:hidden; touch-action:none;
@@ -298,7 +309,7 @@ REMOTE_PAGE = r"""<!doctype html>
   /* Buttons */
   .row { display:grid; gap:var(--gap); flex:none; }
   .clicks { grid-template-columns:1fr 1fr; }
-  .r4 { grid-template-columns:repeat(4, 1fr); }
+  .r5 { grid-template-columns:repeat(5, 1fr); }
   .r6 { grid-template-columns:repeat(4, 1fr) 2fr; }
   .media { grid-template-columns:repeat(6, 1fr); }
   button.k {
@@ -311,12 +322,19 @@ REMOTE_PAGE = r"""<!doctype html>
   button.k.down { background:var(--mark); color:#12161F; }
   button.k svg { width:24px; height:24px; fill:currentColor; pointer-events:none; }
   button:focus-visible { outline:2px solid var(--mark); outline-offset:2px; }
+  .typing .row.extra { display:none; }
 </style>
 </head>
 <body>
 <div id="app">
   <div class="top">
     <div class="state" id="state"><i class="dot"></i><span id="stateText">Connecting</span></div>
+  </div>
+
+  <div class="typebar">
+    <input id="text" type="text" inputmode="text" enterkeyhint="send" placeholder="Type here, it appears on the PC"
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Text to type on the PC">
+    <button class="k" id="typeDone" style="padding:0 16px;height:44px">Done</button>
   </div>
 
   <div id="pad" role="application" aria-label="Trackpad">
@@ -328,13 +346,16 @@ REMOTE_PAGE = r"""<!doctype html>
     <button class="k big" data-b="right">Right click</button>
   </div>
 
-  <div class="row r4 extra">
+  <div class="row r5 extra">
     <button class="k" data-k="esc">Esc</button>
     <button class="k" data-k="tab">Tab</button>
     <button class="k" data-k="backspace" data-repeat aria-label="Backspace">
       <svg viewBox="0 0 24 24"><path d="M9 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9a2 2 0 0 1-1.5-.7L2 12l5.5-6.3A2 2 0 0 1 9 5zm2.7 3.9-1.4 1.4 1.7 1.7-1.7 1.7 1.4 1.4 1.7-1.7 1.7 1.7 1.4-1.4-1.7-1.7 1.7-1.7-1.4-1.4-1.7 1.7z"/></svg>
     </button>
     <button class="k" data-k="enter">Enter</button>
+    <button class="k" id="typeOpen" aria-label="Open keyboard to type">
+      <svg viewBox="0 0 24 24"><path d="M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm1 3v2h2V8zm3.5 0v2h2V8zm3.5 0v2h2V8zm3.500 0v2h2V8zM5 11.5v2h2v-2zm3.5 0v2h2v-2zm3.5 0v2h2v-2zm3.5 0v2h2v-2zM8 15v1.500h8V15z"/></svg>
+    </button>
   </div>
 
   <div class="row r6 extra">
@@ -505,6 +526,43 @@ REMOTE_PAGE = r"""<!doctype html>
     btn.addEventListener('lostpointercapture', up);
     btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   });
+
+  // ---- Typing with the phone keyboard -----------------------------------
+  var text = $('text'), prev = [];
+  function resetText() { text.value = ''; prev = []; }
+  $('typeOpen').addEventListener('click', function () {
+    app.classList.add('typing'); resetText(); text.focus();
+  });
+  function closeTyping() { app.classList.remove('typing'); text.blur(); resetText(); }
+  $('typeDone').addEventListener('click', closeTyping);
+  text.addEventListener('blur', function () { setTimeout(function () {
+    if (document.activeElement !== text) app.classList.remove('typing');
+  }, 150); });
+
+  // Whatever changed in the box is replayed on the PC: backspaces for what
+  // was removed, then the new characters. This also copes with autocorrect.
+  text.addEventListener('input', function () {
+    var cur = Array.from(text.value), same = 0;
+    while (same < prev.length && same < cur.length && prev[same] === cur[same]) same++;
+    var bs = prev.length - same, add = cur.slice(same).join('');
+    if (bs || add) send({ t: 'x', bs: bs, s: add });
+    prev = cur;
+  });
+  text.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); send({ t: 'k', k: 'enter' }); resetText(); }
+    else if (e.key === 'Backspace' && text.value === '') { send({ t: 'k', k: 'backspace' }); }
+  });
+
+  // ---- Keep the layout above the phone keyboard --------------------------
+  var vv = window.visualViewport;
+  function fit() {
+    if (vv) document.documentElement.style.setProperty('--h', vv.height + 'px');
+    window.scrollTo(0, 0);
+  }
+  if (vv) { vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit); }
+  window.addEventListener('orientationchange', fit);
+  fit();
+  document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
 })();
 </script>
 </body>
