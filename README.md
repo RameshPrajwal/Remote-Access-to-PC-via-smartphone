@@ -4,10 +4,6 @@ Use your phone as a wireless trackpad, mouse and keyboard for your PC. No app to
 
 ![The remote on a phone](preview.png)
 
-## Why
-
-I have a mini PC connected to a screen across the room. I wanted to move the cursor, press Esc, pause a video or type a search from the couch without buying a wireless keyboard and mouse. The phone is always within reach, so it became the remote.
-
 ## Features
 
 - **Trackpad:** slide one finger to move the cursor. Slow movements are precise, fast swipes cross the screen.
