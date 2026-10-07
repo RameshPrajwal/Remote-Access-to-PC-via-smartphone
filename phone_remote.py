@@ -247,9 +247,9 @@ REMOTE_PAGE = r"""<!doctype html>
 <title>Remote</title>
 <style>
   :root {
-    --bg:#12161F; --pad:#1B2230;
+    --bg:#12161F; --pad:#1B2230; --key:#273042; --key-hi:#313C52;
     --text:#E9EDF3; --muted:#8E99AC; --mark:#F2CB1D; --ok:#56B6F5; --bad:#F0705F;
-    --gap:8px;
+    --gap:8px; --r:14px;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html, body { margin:0; height:100%; overflow:hidden; overscroll-behavior:none; background:var(--bg); }
@@ -294,6 +294,23 @@ REMOTE_PAGE = r"""<!doctype html>
   .blip.alt { border-color:var(--ok); }
   @keyframes blip { from { transform:scale(.3); opacity:.9; } to { transform:scale(1); opacity:0; } }
   @media (prefers-reduced-motion: reduce) { .blip { animation-duration:.01s; } }
+
+  /* Buttons */
+  .row { display:grid; gap:var(--gap); flex:none; }
+  .clicks { grid-template-columns:1fr 1fr; }
+  .r4 { grid-template-columns:repeat(4, 1fr); }
+  .r6 { grid-template-columns:repeat(4, 1fr) 2fr; }
+  .media { grid-template-columns:repeat(6, 1fr); }
+  button.k {
+    appearance:none; border:0; margin:0; padding:0; height:46px; border-radius:var(--r);
+    background:var(--key); color:var(--text); font:inherit; font-weight:600; font-size:15px;
+    display:flex; align-items:center; justify-content:center; touch-action:none;
+  }
+  button.k.big { height:58px; background:var(--key-hi); font-size:16px; }
+  button.k.glyph { font-size:20px; font-weight:500; }
+  button.k.down { background:var(--mark); color:#12161F; }
+  button.k svg { width:24px; height:24px; fill:currentColor; pointer-events:none; }
+  button:focus-visible { outline:2px solid var(--mark); outline-offset:2px; }
 </style>
 </head>
 <body>
@@ -304,6 +321,37 @@ REMOTE_PAGE = r"""<!doctype html>
 
   <div id="pad" role="application" aria-label="Trackpad">
     <div class="hint">Slide to move, tap to click.<br>Two fingers scroll, a two-finger tap right-clicks.<br>Hold still, then slide to drag.</div>
+  </div>
+
+  <div class="row clicks">
+    <button class="k big" data-b="left">Left click</button>
+    <button class="k big" data-b="right">Right click</button>
+  </div>
+
+  <div class="row r4 extra">
+    <button class="k" data-k="esc">Esc</button>
+    <button class="k" data-k="tab">Tab</button>
+    <button class="k" data-k="backspace" data-repeat aria-label="Backspace">
+      <svg viewBox="0 0 24 24"><path d="M9 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9a2 2 0 0 1-1.5-.7L2 12l5.5-6.3A2 2 0 0 1 9 5zm2.7 3.9-1.4 1.4 1.7 1.7-1.7 1.7 1.4 1.4 1.7-1.7 1.7 1.7 1.4-1.4-1.7-1.7 1.7-1.7-1.4-1.4-1.7 1.7z"/></svg>
+    </button>
+    <button class="k" data-k="enter">Enter</button>
+  </div>
+
+  <div class="row r6 extra">
+    <button class="k glyph" data-k="left" data-repeat aria-label="Left arrow">&#8592;</button>
+    <button class="k glyph" data-k="up" data-repeat aria-label="Up arrow">&#8593;</button>
+    <button class="k glyph" data-k="down" data-repeat aria-label="Down arrow">&#8595;</button>
+    <button class="k glyph" data-k="right" data-repeat aria-label="Right arrow">&#8594;</button>
+    <button class="k" data-k="space">Space</button>
+  </div>
+
+  <div class="row media extra">
+    <button class="k" data-k="prev" aria-label="Previous track"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.500 6 8.500 6V6z"/></svg></button>
+    <button class="k" data-k="play" aria-label="Play or pause"><svg viewBox="0 0 24 24"><path d="M3 6v12l8-6zm10 0h3v12h-3zm5 0h3v12h-3z"/></svg></button>
+    <button class="k" data-k="next" aria-label="Next track"><svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM6 18l8.500-6L6 6z"/></svg></button>
+    <button class="k" data-k="voldown" data-repeat aria-label="Volume down"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 5V4L8 9zm12 2h5v2h-5z"/></svg></button>
+    <button class="k" data-k="mute" aria-label="Mute"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 5V4L8 9zm11.400.200L14 10.600l1.900 1.900-1.900 1.900 1.400 1.400 1.900-1.900 1.900 1.900 1.400-1.400-1.900-1.900 1.900-1.900-1.400-1.400-1.900 1.900z"/></svg></button>
+    <button class="k" data-k="volup" data-repeat aria-label="Volume up"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 5V4L8 9zm13-1h2v3h3v2h-3v3h-2v-3h-3v-2h3z"/></svg></button>
   </div>
 </div>
 
@@ -430,6 +478,33 @@ REMOTE_PAGE = r"""<!doctype html>
   }
   pad.addEventListener('touchend', lift, { passive: false });
   pad.addEventListener('touchcancel', lift, { passive: false });
+
+  // ---- Buttons -----------------------------------------------------------
+  Array.prototype.forEach.call(document.querySelectorAll('button.k[data-k], button.k[data-b]'), function (btn) {
+    var timer = 0, isDown = false;
+    function down(e) {
+      e.preventDefault();
+      if (isDown) return;
+      isDown = true; btn.classList.add('down');
+      try { btn.setPointerCapture(e.pointerId); } catch (err) {}
+      if (btn.dataset.b) { send({ t: 'd', b: btn.dataset.b, down: true }); return; }
+      var k = btn.dataset.k;
+      send({ t: 'k', k: k });
+      if (btn.hasAttribute('data-repeat')) {
+        timer = setTimeout(function again() { send({ t: 'k', k: k }); timer = setTimeout(again, 75); }, 420);
+      }
+    }
+    function up() {
+      if (!isDown) return;
+      isDown = false; btn.classList.remove('down'); clearTimeout(timer);
+      if (btn.dataset.b) send({ t: 'd', b: btn.dataset.b, down: false });
+    }
+    btn.addEventListener('pointerdown', down);
+    btn.addEventListener('pointerup', up);
+    btn.addEventListener('pointercancel', up);
+    btn.addEventListener('lostpointercapture', up);
+    btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  });
 })();
 </script>
 </body>
