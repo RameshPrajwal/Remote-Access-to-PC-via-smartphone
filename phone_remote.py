@@ -2,11 +2,11 @@
 """
 Phone Remote: use your phone as a trackpad, mouse and keyboard for this PC.
 
-Run this on the PC, then open the address it prints in the phone's browser
-(both must be on the same Wi-Fi). The page works as the remote, so nothing
-has to be installed on the phone.
+Run this on the PC. It shows a QR code; scan it with the phone (both must be
+on the same Wi-Fi). The phone opens a web page that works as the remote, so
+nothing has to be installed on the phone.
 
-    pip install aiohttp pynput
+    pip install aiohttp pynput qrcode
     python phone_remote.py
 """
 import argparse
@@ -14,15 +14,20 @@ import json
 import math
 import os
 import platform
+import secrets
 import socket
 import sys
+import webbrowser
+from pathlib import Path
 
 try:
     from aiohttp import WSMsgType, web
 except ImportError:
-    sys.exit("Missing packages. Run this first:\n\n    pip install aiohttp pynput\n")
+    sys.exit("Missing packages. Run this first:\n\n    pip install aiohttp pynput qrcode\n")
 
 SYSTEM = platform.system()  # "Windows", "Darwin" or "Linux"
+HERE = Path(__file__).resolve().parent
+KEY_FILE = HERE / "remote.key"
 DEFAULT_PORT = 8765
 
 
@@ -153,10 +158,25 @@ async def page(request):
                         headers={"Cache-Control": "no-store"})
 
 
+async def pair(request):
+    if request.remote not in ("127.0.0.1", "::1"):
+        raise web.HTTPForbidden(text="Open this page on the PC itself.")
+    app = request.app
+    html = (PAIR_PAGE
+            .replace("__QR__", qr_svg(app["url"]))
+            .replace("__URL__", app["url"])
+            .replace("__NAME__", app["name"]))
+    return web.Response(text=html, content_type="text/html",
+                        headers={"Cache-Control": "no-store"})
+
+
 async def websocket(request):
     app = request.app
     ws = web.WebSocketResponse(heartbeat=20, max_msg_size=8192)
     await ws.prepare(request)
+    if not secrets.compare_digest(request.query.get("k", ""), app["key"]):
+        await ws.close(code=4401, message=b"wrong key")
+        return ws
     inp = app["input"]
     print(f"Phone connected ({request.remote})", flush=True)
     await ws.send_json({"t": "hello", "name": app["name"]})
@@ -176,6 +196,18 @@ async def websocket(request):
     return ws
 
 
+def qr_svg(text):
+    try:
+        import qrcode
+        import qrcode.image.svg
+        img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage,
+                          box_size=10, border=2)
+        svg = img.to_string(encoding="unicode")
+        return svg[svg.index("<svg"):]
+    except Exception:
+        return "<p>Type the address below into Safari on your phone.</p>"
+
+
 def lan_address():
     """The address other devices on the Wi-Fi can reach this PC on."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -189,6 +221,22 @@ def lan_address():
             return "127.0.0.1"
     finally:
         s.close()
+
+
+def load_key():
+    """A private key in the link, so only phones that scanned the code get in."""
+    try:
+        key = KEY_FILE.read_text().strip()
+        if len(key) >= 8:
+            return key
+    except OSError:
+        pass
+    key = secrets.token_urlsafe(9)
+    try:
+        KEY_FILE.write_text(key)
+    except OSError:
+        pass
+    return key
 
 
 def open_socket(port):
@@ -207,28 +255,88 @@ def open_socket(port):
 def main():
     parser = argparse.ArgumentParser(description="Use your phone as a remote for this PC.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--no-browser", action="store_true",
+                        help="do not open the pairing page on this PC")
+    parser.add_argument("--new-key", action="store_true",
+                        help="make a new link; phones paired before must scan again")
     args = parser.parse_args()
+
+    if args.new_key:
+        try:
+            KEY_FILE.unlink()
+        except OSError:
+            pass
 
     try:
         inp = RealInput()
     except ImportError as err:
         if "pynput" in str(err) and "No module" in str(err):
-            sys.exit("Missing packages. Run this first:\n\n    pip install aiohttp pynput\n")
+            sys.exit("Missing packages. Run this first:\n\n    pip install aiohttp pynput qrcode\n")
         sys.exit(f"This PC would not let the program control the mouse:\n{err}")
 
     sock, port = open_socket(args.port)
+    key = load_key()
     app = web.Application()
     app["input"] = inp
+    app["key"] = key
     app["name"] = platform.node() or "this PC"
-    url = f"http://{lan_address()}:{port}/"
-    app.add_routes([web.get("/", page), web.get("/ws", websocket)])
+    app["url"] = f"http://{lan_address()}:{port}/?k={key}"
+    app.add_routes([web.get("/", page), web.get("/pair", pair), web.get("/ws", websocket)])
 
     print("\nPhone Remote is running.\n")
     print("Open this on your phone (same Wi-Fi as the PC):\n")
-    print(f"    {url}\n")
+    print(f"    {app['url']}\n")
+    try:
+        import qrcode
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(app["url"])
+        qr.print_ascii(invert=True)
+    except Exception:
+        pass
     print("Keep this window open while you use the remote. Press Ctrl+C to stop.\n", flush=True)
 
+    if not args.no_browser:
+        try:
+            webbrowser.open(f"http://127.0.0.1:{port}/pair")
+        except Exception:
+            pass
+
     web.run_app(app, sock=sock, print=None, access_log=None)
+
+
+# ----------------------------------------------------------------------------
+# The page shown on the PC: QR code to scan
+# ----------------------------------------------------------------------------
+PAIR_PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pair your phone</title>
+<style>
+  :root { --bg:#12161F; --panel:#1C2330; --text:#E9EDF3; --muted:#8E99AC; --mark:#F2CB1D; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; padding:32px;
+    background:var(--bg); color:var(--text);
+    font:17px/1.5 ui-rounded, "SF Pro Rounded", system-ui, "Segoe UI", sans-serif; }
+  main { display:flex; gap:48px; align-items:center; flex-wrap:wrap; justify-content:center; max-width:860px; }
+  .code { background:#fff; border-radius:20px; padding:10px; width:300px; height:300px; flex:none; }
+  .code svg { width:100%; height:100%; display:block; }
+  .text { max-width:400px; }
+  h1 { font-size:34px; line-height:1.15; margin:0 0 16px; font-weight:700; letter-spacing:-0.01em; }
+  p { margin:0 0 14px; color:var(--muted); }
+  p strong { color:var(--text); font-weight:600; }
+  code { display:block; margin:20px 0; padding:12px 14px; border-radius:10px; background:var(--panel);
+    color:var(--mark); font:15px/1.4 ui-monospace, Consolas, monospace; word-break:break-all; }
+</style></head>
+<body><main>
+  <div class="code">__QR__</div>
+  <div class="text">
+    <h1>Point your phone's camera at the code</h1>
+    <p>Your phone needs to be on <strong>the same Wi-Fi</strong> as __NAME__. Tap the link the camera shows and the remote opens in the browser.</p>
+    <code>__URL__</code>
+    <p>To keep it handy, tap Share and then <strong>Add to Home Screen</strong>. The link only works while the Phone Remote window is open on this PC.</p>
+  </div>
+</main></body></html>
+"""
 
 
 # ----------------------------------------------------------------------------
@@ -323,6 +431,13 @@ REMOTE_PAGE = r"""<!doctype html>
   button.k svg { width:24px; height:24px; fill:currentColor; pointer-events:none; }
   button:focus-visible { outline:2px solid var(--mark); outline-offset:2px; }
   .typing .row.extra { display:none; }
+
+  /* Shown when the link no longer matches this PC */
+  .stale { display:none; position:absolute; inset:0; padding:32px; background:var(--bg);
+    flex-direction:column; justify-content:center; gap:12px; z-index:5; }
+  .stale h1 { font-size:26px; margin:0; line-height:1.2; }
+  .stale p { margin:0; color:var(--muted); line-height:1.5; }
+  .nokey .stale { display:flex; }
 </style>
 </head>
 <body>
@@ -374,6 +489,11 @@ REMOTE_PAGE = r"""<!doctype html>
     <button class="k" data-k="mute" aria-label="Mute"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 5V4L8 9zm11.400.200L14 10.600l1.900 1.900-1.900 1.900 1.400 1.400 1.900-1.900 1.900 1.900 1.400-1.400-1.900-1.900 1.900-1.900-1.400-1.400-1.900 1.900z"/></svg></button>
     <button class="k" data-k="volup" data-repeat aria-label="Volume up"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 5V4L8 9zm13-1h2v3h3v2h-3v3h-2v-3h-3v-2h3z"/></svg></button>
   </div>
+
+  <div class="stale">
+    <h1>This link is out of date</h1>
+    <p>On the PC, open the Phone Remote window and scan the code again with your camera.</p>
+  </div>
 </div>
 
 <script>
@@ -382,13 +502,19 @@ REMOTE_PAGE = r"""<!doctype html>
   var $ = function (id) { return document.getElementById(id); };
   var app = $('app'), pad = $('pad'), stateEl = $('state'), stateText = $('stateText');
 
+  // ---- Remembering small settings (never required for the page to work) ----
+  function load(name) { try { return localStorage.getItem(name); } catch (e) { return null; } }
+  function save(name, value) { try { localStorage.setItem(name, value); } catch (e) {} }
+
   // ---- Connection --------------------------------------------------------
+  var key = new URLSearchParams(location.search).get('k') || load('remoteKey') || '';
+  if (key) save('remoteKey', key);
   var ws = null, retry = 0, pcName = '';
 
   function connect() {
     clearTimeout(retry);
     if (ws && ws.readyState < 2) return;
-    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?k=' + encodeURIComponent(key));
     ws.onmessage = function (e) {
       var m = {}; try { m = JSON.parse(e.data); } catch (err) {}
       if (m.t === 'hello') {
@@ -398,6 +524,7 @@ REMOTE_PAGE = r"""<!doctype html>
     };
     ws.onclose = function (e) {
       stateEl.classList.remove('on');
+      if (e.code === 4401) { app.classList.add('nokey'); return; }
       stateText.textContent = 'Not connected. Is the PC on and the remote running?';
       retry = setTimeout(connect, 1200);
     };
